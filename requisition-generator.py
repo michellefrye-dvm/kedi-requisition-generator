@@ -1,11 +1,14 @@
 """
 Kedi Labs Veterinary Test Requisition Generator
 Flask webhook server for generating professional test requisitions in PDF format
+
+Updated for Option B: Triggered by Airtable test activation (not Shopify order)
 """
 
 import os
 import json
 import base64
+import uuid
 from datetime import datetime
 from functools import wraps
 from io import BytesIO
@@ -28,300 +31,140 @@ WEBHOOK_SECRET = os.getenv('REQUISITION_WEBHOOK_SECRET', 'dev-secret-key')
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', '/tmp/requisitions')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# SKU to Test Panel Mapping
-SKU_TO_TEST_MAP = {
-    # IDEXX Panels - Each with shipping variants
-    '90379999-DROPOFF': {
-        'name': 'IDEXX COMP (Chemistry Panel)',
+# ── Test Name → Test Info Mapping ──
+# Maps the test names from the Airtable activation form to lab-specific details.
+# The keys here should match the "Test Name" multipleSelects values in Airtable.
+TEST_NAME_MAP = {
+    # IDEXX Tests
+    'IDEXX COMP (Chemistry Panel)': {
         'lab': 'IDEXX',
         'testCodes': ['COMP'],
         'specimenType': 'Serum',
         'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'dropoff'
+        'turnaroundDays': 1
     },
-    '90379999-UPS': {
-        'name': 'IDEXX COMP (Chemistry Panel)',
-        'lab': 'IDEXX',
-        'testCodes': ['COMP'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'ups'
-    },
-    '90379999-FEDEX': {
-        'name': 'IDEXX COMP (Chemistry Panel)',
-        'lab': 'IDEXX',
-        'testCodes': ['COMP'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'fedex'
-    },
-    '48689999-DROPOFF': {
-        'name': 'IDEXX CBC (Complete Blood Count)',
+    'IDEXX CBC (Complete Blood Count)': {
         'lab': 'IDEXX',
         'testCodes': ['CBC'],
         'specimenType': 'EDTA Blood',
         'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'dropoff'
+        'turnaroundDays': 1
     },
-    '48689999-UPS': {
-        'name': 'IDEXX CBC (Complete Blood Count)',
-        'lab': 'IDEXX',
-        'testCodes': ['CBC'],
-        'specimenType': 'EDTA Blood',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'ups'
-    },
-    '48689999-FEDEX': {
-        'name': 'IDEXX CBC (Complete Blood Count)',
-        'lab': 'IDEXX',
-        'testCodes': ['CBC'],
-        'specimenType': 'EDTA Blood',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'fedex'
-    },
-    '48719999-DROPOFF': {
-        'name': 'IDEXX Thyroid Panel (T4, Free T4, TSH)',
+    'IDEXX Thyroid Panel (T4, Free T4, TSH)': {
         'lab': 'IDEXX',
         'testCodes': ['T4', 'FT4', 'TSH'],
         'specimenType': 'Serum',
         'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'dropoff'
+        'turnaroundDays': 1
     },
-    '48719999-UPS': {
-        'name': 'IDEXX Thyroid Panel (T4, Free T4, TSH)',
-        'lab': 'IDEXX',
-        'testCodes': ['T4', 'FT4', 'TSH'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'ups'
-    },
-    '48719999-FEDEX': {
-        'name': 'IDEXX Thyroid Panel (T4, Free T4, TSH)',
-        'lab': 'IDEXX',
-        'testCodes': ['T4', 'FT4', 'TSH'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'fedex'
-    },
-    '45559999-DROPOFF': {
-        'name': 'IDEXX Urinalysis',
+    'IDEXX Urinalysis': {
         'lab': 'IDEXX',
         'testCodes': ['UA'],
         'specimenType': 'Urine (midstream)',
         'specimenVolume': '10 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'dropoff'
+        'turnaroundDays': 1
     },
-    '45559999-UPS': {
-        'name': 'IDEXX Urinalysis',
-        'lab': 'IDEXX',
-        'testCodes': ['UA'],
-        'specimenType': 'Urine (midstream)',
-        'specimenVolume': '10 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'ups'
-    },
-    '45559999-FEDEX': {
-        'name': 'IDEXX Urinalysis',
-        'lab': 'IDEXX',
-        'testCodes': ['UA'],
-        'specimenType': 'Urine (midstream)',
-        'specimenVolume': '10 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'fedex'
-    },
-    '37929999-DROPOFF': {
-        'name': 'IDEXX Lipid Panel',
+    'IDEXX Lipid Panel': {
         'lab': 'IDEXX',
         'testCodes': ['CHOL', 'TRIG', 'HDL'],
         'specimenType': 'Serum',
         'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'dropoff'
+        'turnaroundDays': 1
     },
-    '37929999-UPS': {
-        'name': 'IDEXX Lipid Panel',
-        'lab': 'IDEXX',
-        'testCodes': ['CHOL', 'TRIG', 'HDL'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'ups'
-    },
-    '37929999-FEDEX': {
-        'name': 'IDEXX Lipid Panel',
-        'lab': 'IDEXX',
-        'testCodes': ['CHOL', 'TRIG', 'HDL'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'fedex'
-    },
-    '45459999-DROPOFF': {
-        'name': 'IDEXX Electrolyte Panel',
+    'IDEXX Electrolyte Panel': {
         'lab': 'IDEXX',
         'testCodes': ['NA', 'K', 'CL', 'CO2'],
         'specimenType': 'Serum',
         'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'dropoff'
+        'turnaroundDays': 1
     },
-    '45459999-UPS': {
-        'name': 'IDEXX Electrolyte Panel',
-        'lab': 'IDEXX',
-        'testCodes': ['NA', 'K', 'CL', 'CO2'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'ups'
-    },
-    '45459999-FEDEX': {
-        'name': 'IDEXX Electrolyte Panel',
-        'lab': 'IDEXX',
-        'testCodes': ['NA', 'K', 'CL', 'CO2'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'fedex'
-    },
-    '24483999-DROPOFF': {
-        'name': 'IDEXX Liver Function Panel',
+    'IDEXX Liver Function Panel': {
         'lab': 'IDEXX',
         'testCodes': ['ALT', 'AST', 'ALKP', 'TBIL'],
         'specimenType': 'Serum',
         'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'dropoff'
-    },
-    '24483999-UPS': {
-        'name': 'IDEXX Liver Function Panel',
-        'lab': 'IDEXX',
-        'testCodes': ['ALT', 'AST', 'ALKP', 'TBIL'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'ups'
-    },
-    '24483999-FEDEX': {
-        'name': 'IDEXX Liver Function Panel',
-        'lab': 'IDEXX',
-        'testCodes': ['ALT', 'AST', 'ALKP', 'TBIL'],
-        'specimenType': 'Serum',
-        'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 1,
-        'shipping': 'fedex'
+        'turnaroundDays': 1
     },
 
-    # Antech Panels
-    'UTID002': {
-        'name': 'Antech Urinalysis with Culture',
+    # Antech Tests
+    'Antech Urinalysis with Culture': {
         'lab': 'Antech',
         'testCodes': ['UA', 'URINE-CULT'],
         'specimenType': 'Urine (sterile, midstream)',
         'specimenVolume': '10 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'fedex'
+        'turnaroundDays': 2
     },
-    'UTIC002': {
-        'name': 'Antech Therapeutic Drug Monitoring',
+    'Antech Therapeutic Drug Monitoring': {
         'lab': 'Antech',
         'testCodes': ['TDM-PHENO', 'TDM-PHENOBARB'],
         'specimenType': 'Serum',
         'specimenVolume': '0.5 mL min',
-        'turnaroundDays': 2,
-        'shipping': 'fedex'
+        'turnaroundDays': 2
     },
-    'FP002': {
-        'name': 'Antech Fungal Panel (Dermatophyte)',
+    'Antech Fungal Panel (Dermatophyte)': {
         'lab': 'Antech',
         'testCodes': ['DERMA-CULT'],
         'specimenType': 'Hair/Scale (sterile collection)',
         'specimenVolume': 'Direct collection',
-        'turnaroundDays': 5,
-        'shipping': 'fedex'
+        'turnaroundDays': 5
     },
-    'OPGIA002': {
-        'name': 'Antech Ophthalmology Panel',
+    'Antech Ophthalmology Panel': {
         'lab': 'Antech',
         'testCodes': ['SCRAPE', 'STAIN'],
         'specimenType': 'Conjunctival scraping',
         'specimenVolume': 'Direct collection',
-        'turnaroundDays': 2,
-        'shipping': 'fedex'
+        'turnaroundDays': 2
     },
-    'PPPS-001': {
-        'name': 'Antech Parasite Panel',
+    'Antech Parasite Panel': {
         'lab': 'Antech',
         'testCodes': ['FECAL', 'PARASITE-ID'],
         'specimenType': 'Fecal (fresh)',
         'specimenVolume': '2-5g',
-        'turnaroundDays': 1,
-        'shipping': 'fedex'
+        'turnaroundDays': 1
     },
 
-    # RealPCR Panels
-    '2524': {
-        'name': 'RealPCR Feline Infectious Peritonitis (FIP)',
+    # RealPCR Tests
+    'RealPCR Feline Infectious Peritonitis (FIP)': {
         'lab': 'RealPCR',
         'testCodes': ['FIP-PCR'],
         'specimenType': 'Serum or Whole Blood',
         'specimenVolume': '0.5 mL',
-        'turnaroundDays': 3,
-        'shipping': 'fedex'
+        'turnaroundDays': 3
     },
-    '2625': {
-        'name': 'RealPCR Canine Pancreatitis',
+    'RealPCR Canine Pancreatitis': {
         'lab': 'RealPCR',
         'testCodes': ['PANC-PCR'],
         'specimenType': 'Serum',
         'specimenVolume': '0.5 mL',
-        'turnaroundDays': 3,
-        'shipping': 'fedex'
+        'turnaroundDays': 3
     },
-    '2627': {
-        'name': 'RealPCR Feline Leukemia (FeLV)',
+    'RealPCR Feline Leukemia (FeLV)': {
         'lab': 'RealPCR',
         'testCodes': ['FELV-PCR'],
         'specimenType': 'Whole Blood',
         'specimenVolume': '0.5 mL',
-        'turnaroundDays': 2,
-        'shipping': 'fedex'
+        'turnaroundDays': 2
     },
-    '2512': {
-        'name': 'RealPCR Feline Immunodeficiency (FIV)',
+    'RealPCR Feline Immunodeficiency (FIV)': {
         'lab': 'RealPCR',
         'testCodes': ['FIV-PCR'],
         'specimenType': 'Whole Blood',
         'specimenVolume': '0.5 mL',
-        'turnaroundDays': 2,
-        'shipping': 'fedex'
+        'turnaroundDays': 2
     },
-    '26251': {
-        'name': 'RealPCR Canine Parvovirus',
+    'RealPCR Canine Parvovirus': {
         'lab': 'RealPCR',
         'testCodes': ['CPV-PCR'],
         'specimenType': 'Fecal',
         'specimenVolume': '1g',
-        'turnaroundDays': 2,
-        'shipping': 'fedex'
+        'turnaroundDays': 2
     },
-    '51991': {
-        'name': 'RealPCR Lyme Disease (Borrelia burgdorferi)',
+    'RealPCR Lyme Disease (Borrelia burgdorferi)': {
         'lab': 'RealPCR',
         'testCodes': ['LYME-PCR'],
         'specimenType': 'Serum or Whole Blood',
         'specimenVolume': '0.5 mL',
-        'turnaroundDays': 3,
-        'shipping': 'fedex'
+        'turnaroundDays': 3
     }
 }
 
@@ -340,26 +183,56 @@ def require_auth(f):
     return decorated_function
 
 
-def get_test_info(sku):
-    """Retrieve test information by SKU, with fallback logic"""
-    if sku in SKU_TO_TEST_MAP:
-        return SKU_TO_TEST_MAP[sku]
+def resolve_test_info(test_name, lab_vendor=None):
+    """
+    Resolve test info from test name (as selected in the Airtable activation form).
+    Falls back to a generic entry if no exact match is found.
+    """
+    # Direct match
+    if test_name in TEST_NAME_MAP:
+        info = TEST_NAME_MAP[test_name].copy()
+        info['name'] = test_name
+        return info
 
-    # Fallback: Try to extract base SKU without shipping suffix
-    for key, value in SKU_TO_TEST_MAP.items():
-        if key.startswith(sku):
-            return value
+    # Fuzzy match: check if the test_name is a substring of any key or vice versa
+    test_lower = test_name.lower()
+    for key, value in TEST_NAME_MAP.items():
+        if test_lower in key.lower() or key.lower() in test_lower:
+            info = value.copy()
+            info['name'] = key
+            return info
 
-    # Last resort: Create generic entry
+    # Fallback: build a generic entry using lab_vendor if provided
+    lab = lab_vendor or 'Unknown'
     return {
-        'name': 'Unknown Test',
-        'lab': 'Unknown',
+        'name': test_name,
+        'lab': lab,
         'testCodes': ['CUSTOM'],
-        'specimenType': 'Varies',
-        'specimenVolume': 'See instructions',
-        'turnaroundDays': 3,
-        'shipping': 'standard'
+        'specimenType': 'See kit instructions',
+        'specimenVolume': 'See kit instructions',
+        'turnaroundDays': 3
     }
+
+
+def calculate_pet_age(birthday_str):
+    """Calculate age string from a birthday date string (ISO format or common formats)"""
+    if not birthday_str:
+        return 'Not provided'
+    try:
+        # Try ISO format first (YYYY-MM-DD)
+        bday = datetime.strptime(birthday_str[:10], '%Y-%m-%d')
+        today = datetime.now()
+        years = today.year - bday.year
+        months = today.month - bday.month
+        if months < 0:
+            years -= 1
+            months += 12
+        if years > 0:
+            return f"{years} year(s), {months} month(s)"
+        else:
+            return f"{months} month(s)"
+    except (ValueError, TypeError):
+        return birthday_str  # Return as-is if we can't parse
 
 
 def generate_idexx_requisition(data, test_info):
@@ -409,22 +282,26 @@ def generate_idexx_requisition(data, test_info):
     story.append(Spacer(1, 0.15*inch))
 
     # Client/Patient Information Table
+    patient_info = (
+        f"Patient Name: {data.get('petName', '')}\n"
+        f"Species: {data.get('species', '')}\n"
+        f"Breed: {data.get('breed', 'Not specified')}\n"
+        f"Gender: {data.get('gender', 'Not specified')}\n"
+        f"Age: {data.get('age', 'Not provided')}"
+    )
+
     client_data = [
         ['CLIENT INFORMATION', 'PATIENT INFORMATION'],
         [
-            f"Name: {data['customerFirstName']} {data['customerLastName']}\n"
-            f"Phone: {data['customerPhone']}\n"
-            f"Email: {data['customerEmail']}",
-            f"Patient Name: {data['petName']}\n"
-            f"Species: {data['species']}\n"
-            f"Breed: {data['breed']}\n"
-            f"Age: {data['age']}\n"
-            f"Weight: {data['weight']} {data.get('weightUnit', 'lbs')}"
+            f"Name: {data.get('customerFirstName', '')} {data.get('customerLastName', '')}\n"
+            f"Phone: {data.get('customerPhone', 'N/A')}\n"
+            f"Email: {data.get('customerEmail', '')}",
+            patient_info
         ]
     ]
 
-    if data.get('microchipNumber'):
-        client_data[1][1] += f"\nMicrochip #: {data['microchipNumber']}"
+    if data.get('vetEmail'):
+        client_data[1][0] += f"\nVeterinarian: {data['vetEmail']}"
 
     client_table = Table(client_data, colWidths=[3.25*inch, 3.25*inch])
     client_table.setStyle(TableStyle([
@@ -477,6 +354,7 @@ def generate_idexx_requisition(data, test_info):
         clinical_info += f"Conditions: {data['conditions']}\n"
     if data.get('medications'):
         clinical_info += f"Current Medications: {data['medications']}\n"
+
     clinical_info += "\nAdditional Notes: ___________________________________________"
 
     story.append(Paragraph(clinical_info, normal_style))
@@ -485,34 +363,27 @@ def generate_idexx_requisition(data, test_info):
     # Specimen Handling Instructions
     story.append(Paragraph("SPECIMEN HANDLING & SHIPPING", subheader_style))
 
-    if test_info['shipping'] == 'dropoff':
-        shipping_info = (
-            "INSTRUCTIONS: This specimen requires immediate testing. Please deliver specimen to "
-            "an IDEXX drop-off location immediately or within 2 hours of collection. "
-            "Keep specimen at room temperature during transport."
-        )
-    elif test_info['shipping'] == 'ups':
-        shipping_info = (
-            "INSTRUCTIONS: Place specimen in provided transport tube with cold pack. "
-            "Ship via UPS Next Day Air with signature required. "
-            "Ensure delivery within 24 hours of collection."
-        )
-    else:
-        shipping_info = (
-            "INSTRUCTIONS: Place specimen in provided transport tube with ice pack. "
-            "Ship via FedEx Overnight for immediate processing. "
-            "Ensure delivery within 24 hours of collection."
-        )
+    shipping_info = (
+        "INSTRUCTIONS: Place specimen in provided transport tube with ice pack. "
+        "Ship using the shipping label included in your test kit. "
+        "IDEXX provides pre-paid shipping labels for specimen delivery. "
+        "Ensure delivery within 24 hours of collection."
+    )
 
     story.append(Paragraph(shipping_info, normal_style))
     story.append(Spacer(1, 0.15*inch))
 
     # Footer
+    req_id = data.get('requisitionId', 'N/A')
+    activation_code = data.get('activationCode', '')
     footer_text = (
         f"Requisition Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}<br/>"
-        f"Order ID: {data['orderId']}<br/>"
-        f"<i>This is an automated requisition from Kedi Labs. Keep this form with your specimen.</i>"
+        f"Requisition ID: {req_id}<br/>"
     )
+    if activation_code:
+        footer_text += f"Activation Code: {activation_code}<br/>"
+    footer_text += "<i>This is an automated requisition from Kedi Labs. Keep this form with your specimen.</i>"
+
     story.append(Paragraph(footer_text, ParagraphStyle(
         'Footer',
         parent=styles['Normal'],
@@ -573,22 +444,26 @@ def generate_antech_requisition(data, test_info):
     story.append(Spacer(1, 0.15*inch))
 
     # Client/Patient Information Table
+    patient_info = (
+        f"Animal Name: {data.get('petName', '')}\n"
+        f"Species: {data.get('species', '')}\n"
+        f"Breed: {data.get('breed', 'Not specified')}\n"
+        f"Gender: {data.get('gender', 'Not specified')}\n"
+        f"Age: {data.get('age', 'Not provided')}"
+    )
+
     client_data = [
         ['OWNER INFORMATION', 'PATIENT INFORMATION'],
         [
-            f"Name: {data['customerFirstName']} {data['customerLastName']}\n"
-            f"Phone: {data['customerPhone']}\n"
-            f"Email: {data['customerEmail']}",
-            f"Animal Name: {data['petName']}\n"
-            f"Species: {data['species']}\n"
-            f"Breed: {data['breed']}\n"
-            f"Age: {data['age']}\n"
-            f"Weight: {data['weight']} {data.get('weightUnit', 'lbs')}"
+            f"Name: {data.get('customerFirstName', '')} {data.get('customerLastName', '')}\n"
+            f"Phone: {data.get('customerPhone', 'N/A')}\n"
+            f"Email: {data.get('customerEmail', '')}",
+            patient_info
         ]
     ]
 
-    if data.get('microchipNumber'):
-        client_data[1][1] += f"\nMicrochip: {data['microchipNumber']}"
+    if data.get('vetEmail'):
+        client_data[1][0] += f"\nVeterinarian: {data['vetEmail']}"
 
     client_table = Table(client_data, colWidths=[3.25*inch, 3.25*inch])
     client_table.setStyle(TableStyle([
@@ -654,7 +529,8 @@ def generate_antech_requisition(data, test_info):
     story.append(Paragraph("SHIPMENT INSTRUCTIONS", subheader_style))
 
     shipping_text = (
-        "IMPORTANT: This specimen is being shipped via FedEx. A FedEx shipping label is included with this requisition. "
+        "IMPORTANT: This specimen is being shipped via FedEx. A FedEx shipping label is included "
+        "with your test kit, or will be emailed to you separately. "
         "Follow these steps:\n\n"
         "1. Collect specimen according to type specified above\n"
         "2. Place specimen in provided transport container\n"
@@ -668,11 +544,16 @@ def generate_antech_requisition(data, test_info):
     story.append(Spacer(1, 0.15*inch))
 
     # Footer
+    req_id = data.get('requisitionId', 'N/A')
+    activation_code = data.get('activationCode', '')
     footer_text = (
         f"Requisition Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}<br/>"
-        f"Order ID: {data['orderId']}<br/>"
-        f"<i>Provided by Kedi Labs | www.kedilabs.com</i>"
+        f"Requisition ID: {req_id}<br/>"
     )
+    if activation_code:
+        footer_text += f"Activation Code: {activation_code}<br/>"
+    footer_text += "<i>Provided by Kedi Labs | www.kedilabs.com</i>"
+
     story.append(Paragraph(footer_text, ParagraphStyle(
         'Footer',
         parent=styles['Normal'],
@@ -733,19 +614,26 @@ def generate_realpcr_requisition(data, test_info):
     story.append(Spacer(1, 0.15*inch))
 
     # Client/Patient Information Table
+    patient_info = (
+        f"Patient Name: {data.get('petName', '')}\n"
+        f"Species: {data.get('species', '')}\n"
+        f"Breed: {data.get('breed', 'Not specified')}\n"
+        f"Gender: {data.get('gender', 'Not specified')}\n"
+        f"Age: {data.get('age', 'Not provided')}"
+    )
+
     client_data = [
         ['OWNER INFORMATION', 'PATIENT INFORMATION'],
         [
-            f"Name: {data['customerFirstName']} {data['customerLastName']}\n"
-            f"Phone: {data['customerPhone']}\n"
-            f"Email: {data['customerEmail']}",
-            f"Patient Name: {data['petName']}\n"
-            f"Species: {data['species']}\n"
-            f"Breed: {data['breed']}\n"
-            f"Age: {data['age']}\n"
-            f"Weight: {data['weight']} {data.get('weightUnit', 'lbs')}"
+            f"Name: {data.get('customerFirstName', '')} {data.get('customerLastName', '')}\n"
+            f"Phone: {data.get('customerPhone', 'N/A')}\n"
+            f"Email: {data.get('customerEmail', '')}",
+            patient_info
         ]
     ]
+
+    if data.get('vetEmail'):
+        client_data[1][0] += f"\nVeterinarian: {data['vetEmail']}"
 
     client_table = Table(client_data, colWidths=[3.25*inch, 3.25*inch])
     client_table.setStyle(TableStyle([
@@ -816,11 +704,16 @@ def generate_realpcr_requisition(data, test_info):
     story.append(Spacer(1, 0.15*inch))
 
     # Footer
+    req_id = data.get('requisitionId', 'N/A')
+    activation_code = data.get('activationCode', '')
     footer_text = (
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}<br/>"
-        f"Order #: {data['orderId']}<br/>"
-        f"<i>RealPCR Diagnostics via Kedi Labs</i>"
+        f"Requisition ID: {req_id}<br/>"
     )
+    if activation_code:
+        footer_text += f"Activation Code: {activation_code}<br/>"
+    footer_text += "<i>RealPCR Diagnostics via Kedi Labs</i>"
+
     story.append(Paragraph(footer_text, ParagraphStyle(
         'Footer',
         parent=styles['Normal'],
@@ -837,65 +730,116 @@ def generate_realpcr_requisition(data, test_info):
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return jsonify({'status': 'ok', 'service': 'requisition-generator'}), 200
+    return jsonify({
+        'status': 'ok',
+        'service': 'requisition-generator',
+        'version': '2.0-airtable',
+        'timestamp': datetime.now().isoformat()
+    }), 200
 
 
 @app.route('/generate-requisition', methods=['POST'])
 @require_auth
 def generate_requisition():
     """
-    Main webhook endpoint to generate test requisitions
-    Receives order data from Make.com and generates appropriate PDF
+    Main webhook endpoint to generate test requisitions.
+
+    Option B flow: Triggered by Make.com when a new record appears in
+    the Airtable "Customer Test Activations" table.
+
+    Expected JSON payload (mapped from Airtable fields by Make.com):
+    {
+        "customerFirstName": "Jane",
+        "customerLastName": "Smith",
+        "customerEmail": "jane@example.com",
+        "customerPhone": "555-1234",
+        "petName": "Buddy",
+        "species": "Canine",
+        "breed": "Golden Retriever",
+        "gender": "Male",
+        "birthday": "2020-03-15",
+        "testName": "IDEXX CBC (Complete Blood Count)",
+        "labVendor": "IDEXX",
+        "activationCode": "KL-ABC123",
+        "vetEmail": "drjones@vetclinic.com",
+        "airtableRecordId": "recXYZ123"
+    }
     """
     try:
         data = request.get_json()
 
-        # Validate required fields
-        required_fields = ['orderId', 'sku', 'customerEmail', 'petName', 'species']
+        # Validate required fields for Airtable activation flow
+        required_fields = ['customerEmail', 'petName', 'species', 'testName']
         for field in required_fields:
             if not data.get(field):
                 return jsonify({'error': f'Missing required field: {field}'}), 400
 
-        # Get test information
-        test_info = get_test_info(data['sku'])
+        # Generate a requisition ID
+        req_id = f"KL-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+        data['requisitionId'] = req_id
 
-        # Determine lab type and generate appropriate requisition
+        # Calculate age from birthday if provided
+        if data.get('birthday') and not data.get('age'):
+            data['age'] = calculate_pet_age(data['birthday'])
+        elif not data.get('age'):
+            data['age'] = 'Not provided'
+
+        # Handle test name — could be a single string or comma-separated list
+        test_name = data['testName']
+        if isinstance(test_name, list):
+            test_name = test_name[0]  # Use first test for primary requisition
+
+        # Resolve test info from the test name
+        lab_vendor = data.get('labVendor', '')
+        if isinstance(lab_vendor, list):
+            lab_vendor = lab_vendor[0] if lab_vendor else ''
+        test_info = resolve_test_info(test_name, lab_vendor)
+
+        # Determine lab and generate PDF
         lab = test_info['lab']
 
         if lab == 'IDEXX':
             pdf_buffer = generate_idexx_requisition(data, test_info)
-            filename = f"IDEXX_Requisition_{data['orderId']}.pdf"
+            filename = f"IDEXX_Requisition_{req_id}.pdf"
         elif lab == 'Antech':
             pdf_buffer = generate_antech_requisition(data, test_info)
-            filename = f"Antech_Requisition_{data['orderId']}.pdf"
+            filename = f"Antech_Requisition_{req_id}.pdf"
         else:  # RealPCR or other
             pdf_buffer = generate_realpcr_requisition(data, test_info)
-            filename = f"RealPCR_Requisition_{data['orderId']}.pdf"
+            filename = f"RealPCR_Requisition_{req_id}.pdf"
 
-        # Convert to base64
+        # Convert to base64 for Make.com to attach to email / Airtable
         pdf_base64 = base64.b64encode(pdf_buffer.getvalue()).decode('utf-8')
 
-        # Save PDF to file system (optional, for archival)
+        # Save PDF to file system (archival)
         pdf_path = os.path.join(UPLOAD_FOLDER, filename)
         with open(pdf_path, 'wb') as f:
             f.write(pdf_buffer.getvalue())
 
-        # Build response
+        # Build response — Make.com will use this to:
+        # 1. Email the PDF to the pet owner
+        # 2. Update the Airtable "ST - Lab Requisitions" table
         response = {
             'success': True,
-            'orderId': data['orderId'],
-            'testType': lab,
+            'requisitionId': req_id,
+            'lab': lab,
+            'testName': test_info['name'],
+            'testCodes': test_info['testCodes'],
             'fileName': filename,
             'pdfBase64': pdf_base64,
-            'pdfUrl': None,  # Can add URL if hosting PDFs
+            'petName': data.get('petName'),
+            'ownerEmail': data.get('customerEmail'),
+            'activationCode': data.get('activationCode', ''),
+            'airtableRecordId': data.get('airtableRecordId', ''),
             'timestamp': datetime.now().isoformat()
         }
 
-        # For Antech tests, include FedEx label info
+        # For Antech tests, note shipping label info
         if lab == 'Antech':
-            response['fedexLabelUrl'] = None  # Would be populated with actual label service
-            response['fedexLabelBase64'] = None
-            response['message'] = 'Antech requisition generated. FedEx label should be generated separately.'
+            response['shippingNote'] = (
+                'Antech requisition generated. FedEx shipping label should be '
+                'included in the test kit or emailed separately.'
+            )
 
         return jsonify(response), 200
 
@@ -905,27 +849,26 @@ def generate_requisition():
         return jsonify({'error': str(e), 'type': type(e).__name__}), 500
 
 
-@app.route('/test-sku/<sku>', methods=['GET'])
-def test_sku(sku):
-    """Endpoint to test SKU lookup (for debugging)"""
-    test_info = get_test_info(sku)
-    return jsonify({
-        'sku': sku,
-        'found': sku in SKU_TO_TEST_MAP or any(key.startswith(sku) for key in SKU_TO_TEST_MAP),
-        'testInfo': test_info
-    }), 200
+@app.route('/available-tests', methods=['GET'])
+def available_tests():
+    """List all available test names and their lab info"""
+    tests = []
+    for name, info in TEST_NAME_MAP.items():
+        tests.append({
+            'testName': name,
+            'lab': info['lab'],
+            'testCodes': info['testCodes'],
+            'specimenType': info['specimenType'],
+            'turnaroundDays': info['turnaroundDays']
+        })
 
-
-@app.route('/available-skus', methods=['GET'])
-def available_skus():
-    """List all available SKUs and tests"""
     return jsonify({
-        'count': len(SKU_TO_TEST_MAP),
-        'skus': list(SKU_TO_TEST_MAP.keys()),
+        'count': len(tests),
+        'tests': tests,
         'summary': {
-            'idexx': len([k for k in SKU_TO_TEST_MAP.keys() if 'IDEXX' in SKU_TO_TEST_MAP[k]['lab']]),
-            'antech': len([k for k in SKU_TO_TEST_MAP.keys() if 'Antech' in SKU_TO_TEST_MAP[k]['lab']]),
-            'realpcr': len([k for k in SKU_TO_TEST_MAP.keys() if 'RealPCR' in SKU_TO_TEST_MAP[k]['lab']])
+            'idexx': len([t for t in tests if t['lab'] == 'IDEXX']),
+            'antech': len([t for t in tests if t['lab'] == 'Antech']),
+            'realpcr': len([t for t in tests if t['lab'] == 'RealPCR'])
         }
     }), 200
 
