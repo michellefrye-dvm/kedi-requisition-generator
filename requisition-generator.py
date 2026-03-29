@@ -6,10 +6,10 @@ Updated for Option B: Triggered by Airtable test activation (not Shopify order)
 """
 
 import os
-import jso
+import json
 import base64
 import uuid
-from datetime import datetim
+from datetime import datetime
 from functools import wraps
 from io import BytesIO
 
